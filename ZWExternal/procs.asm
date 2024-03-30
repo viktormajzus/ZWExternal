@@ -1,11 +1,18 @@
 .code
 
-ZwReadVirtualMemory proc
+ZwQueryVirtualMemory proc
 	mov r10, rcx
-	mov eax, 3Fh
+	mov eax, 23h
 	syscall
 	ret
-ZwReadVirtualMemory endp
+ZwQueryVirtualMemory endp
+
+ZwOpenProcess proc
+	mov r10, rcx
+	mov eax, 26h
+	syscall
+	ret
+ZwOpenProcess endp
 
 ZwWriteVirtualMemory proc
 	mov r10, rcx
@@ -14,12 +21,12 @@ ZwWriteVirtualMemory proc
 	ret
 ZwWriteVirtualMemory endp
 
-ZwOpenProcess proc
+ZwReadVirtualMemory proc
 	mov r10, rcx
-	mov eax, 26h
+	mov eax, 3Fh
 	syscall
 	ret
-ZwOpenProcess endp
+ZwReadVirtualMemory endp
 
 ZwProtectVirtualMemory proc
 	mov r10, rcx

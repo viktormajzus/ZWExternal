@@ -13,10 +13,46 @@
 #include "structs.h"
 
 // Functions defined in procs.asm
-extern "C" NTSTATUS ZwReadVirtualMemory(HANDLE hProcess, void* lpBaseAddress, void* lpBuffer, SIZE_T nSize, SIZE_T * lpNumberOfBytesRead = NULL);
-extern "C" NTSTATUS ZwWriteVirtualMemory(HANDLE hProcess, void* lpBaseAddress, void* lpBuffer, SIZE_T nSize, SIZE_T * lpNumberOfBytesRead = NULL);
-extern "C" NTSTATUS ZwOpenProcess(PHANDLE hProcess, ACCESS_MASK DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes, PCLIENT_ID ClientId);
-extern "C" NTSTATUS ZwProtectVirtualMemory(HANDLE hProcess, void* pAddress, size_t dwSize, ULONG newProtect, PULONG oldProtect);
+extern "C" NTSTATUS ZwReadVirtualMemory(HANDLE hProcess, 
+                                        void* lpBaseAddress, 
+                                        void* lpBuffer, 
+                                        SIZE_T nSize, 
+                                        SIZE_T * lpNumberOfBytesRead = NULL);
+
+extern "C" NTSTATUS ZwWriteVirtualMemory(HANDLE hProcess, 
+                                         void* lpBaseAddress, 
+                                         void* lpBuffer, 
+                                         SIZE_T nSize, 
+                                         SIZE_T * lpNumberOfBytesRead = NULL);
+
+extern "C" NTSTATUS ZwOpenProcess(PHANDLE hProcess, 
+                                  ACCESS_MASK DesiredAccess, 
+                                  POBJECT_ATTRIBUTES ObjectAttributes, 
+                                  PCLIENT_ID ClientId);
+
+extern "C" NTSTATUS ZwProtectVirtualMemory(HANDLE hProcess, 
+                                           PVOID pAddress, 
+                                           size_t *dwSize, 
+                                           ULONG newProtect, 
+                                           PULONG oldProtect);
+
+extern "C" NTSTATUS ZwQueryVirtualMemory(HANDLE hProcess, 
+                                         PULONGLONG BaseAddress, 
+                                         MEMORY_INFORMATION_CLASS MemoryInformationClass, 
+                                         PVOID Buffer, 
+                                         ULONG Length, 
+                                         PULONG ResultLength);
+
+extern "C" NTSYSCALLAPI NTSTATUS NtQueryVirtualMemory(
+  HANDLE                   ProcessHandle,
+  PVOID                    BaseAddress,
+  MEMORY_INFORMATION_CLASS MemoryInformationClass,
+  PVOID                    MemoryInformation,
+  SIZE_T                   MemoryInformationLength,
+  PSIZE_T                  ReturnLength
+);
+
+
 
 class HandleManager
 {
@@ -75,7 +111,7 @@ public:
   }
 
   /// Setter for the handle
-  void SetHandle(DWORD dwProcId)
+  void SetHandle(DWORD dwProcId, ACCESS_MASK dwDesiredAccess)
   {
     HANDLE h;
 
@@ -84,7 +120,7 @@ public:
     OBJECT_ATTRIBUTES oa;
     InitializeObjectAttributes(&oa, 0, 0, 0, 0);
 
-    ZwOpenProcess(&h, GENERIC_ALL, &oa, &cid);
+    ZwOpenProcess(&h, dwDesiredAccess, &oa, &cid);
 
     if (handle && handle != INVALID_HANDLE_VALUE)
     {
@@ -102,7 +138,7 @@ private:
 
 public:
   /// Constructor that takes a process name, finds ProcessID and opens a handle to the process
-  explicit ZwMemTools(const std::wstring& processName) : procId(0), handleManager()
+  explicit ZwMemTools(const std::wstring& processName, ACCESS_MASK dwDesiredAccess) : procId(0), handleManager()
   {
     auto hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, NULL);
     HandleManager snapshotHandle(hSnapshot);
@@ -122,7 +158,7 @@ public:
       if (processName.compare(procEntry.szExeFile) == 0)
       {
         procId = procEntry.th32ProcessID;
-        handleManager.SetHandle(procId);
+        handleManager.SetHandle(procId, dwDesiredAccess);
         return;
       }
     } while (Process32Next(hSnapshot, &procEntry));
@@ -202,7 +238,7 @@ public:
   uintptr_t Resolve(uintptr_t baseAddress, uintptr_t offset)
   {
     uintptr_t addr = baseAddress;
-    if (ZwReadVirtualMemory(handleManager.GetHandle(), reinterpret_cast<void*>(baseAddress), &addr, sizeof(addr), NULL) != STATUS_SUCCESS)
+    if (this->Read<uintptr_t>(reinterpret_cast<PULONGLONG>(baseAddress), addr))
     {
       OutputDebugString(L"Failed to read memory\n");
       return NULL;
@@ -217,7 +253,7 @@ public:
     uintptr_t addr = baseAddress;
     for (size_t i = 0; i < offsets.size(); ++i)
     {
-      if (ZwReadVirtualMemory(handleManager.GetHandle(), reinterpret_cast<void*>(addr), &addr, sizeof(addr), NULL) != STATUS_SUCCESS)
+      if (!this->Read<uintptr_t>(reinterpret_cast<PULONGLONG>(addr), addr))
       {
         OutputDebugString(L"Failed to read memory\n");
         return NULL;
@@ -230,15 +266,33 @@ public:
 
   /// Wrapper for ReadProcessMemory
   template<typename T>
-  T Read(uintptr_t address)
+  bool Read(PULONGLONG address, T& val)
   {
-    T val;
-    if (ZwReadVirtualMemory(handleManager.GetHandle(), reinterpret_cast<void*>(address), &val, sizeof(T), NULL) != STATUS_SUCCESS)
+    SIZE_T sVal = sizeof(val);
+    MEMORY_BASIC_INFORMATION mbi = { 0 };
+
+    NTSTATUS status = NtQueryVirtualMemory(handleManager.GetHandle(), address, MemoryBasicInformation, &mbi, sizeof(mbi), NULL);
+    // Query the virtual memory range to determine if it's accessible
+    if (status != STATUS_SUCCESS)
+    {
+      OutputDebugString(L"QVM: Failed to query memory\n");
+      return false;
+    }
+
+    if (mbi.State != MEM_COMMIT || mbi.Protect == PAGE_NOACCESS)
+    {
+      // The memory range is not committed or accessible, so don't attempt to read from it
+      OutputDebugString(L"Memory range is not accessible\n");
+      return false;
+    }
+
+    if (ZwReadVirtualMemory(handleManager.GetHandle(), address, &val, sizeof(T), NULL) != STATUS_SUCCESS)
     {
       OutputDebugString(L"Failed to read memory\n");
-      return NULL;
+      return false;
     }
-    return val;
+
+    return true;
   }
 
   bool ReadSized(uintptr_t address, size_t size, LPCVOID buffer)
@@ -253,25 +307,41 @@ public:
 
   /// Wrapper for WriteProcessMemory
   template<typename T>
-  bool Write(uintptr_t address, T& val)
+  bool Write(void* address, T& val)
   {
-    if (ZwWriteVirtualMemory(handleManager.GetHandle(), reinterpret_cast<void*>(address), &val, sizeof(T), NULL) != STATUS_SUCCESS)
+    DWORD dwOldProtect;
+    void* oldAddress = address;
+    size_t sVal = sizeof(T);
+    if (ZwProtectVirtualMemory(handleManager.GetHandle(), reinterpret_cast<PVOID>(&address), &sVal, PAGE_EXECUTE_READWRITE, &dwOldProtect) != STATUS_SUCCESS)
+    {
+      OutputDebugString(L"WPM: Failed to protect memory\n");
+      return false;
+    }
+    if (ZwWriteVirtualMemory(handleManager.GetHandle(), oldAddress, &val, sizeof(T), NULL) != STATUS_SUCCESS)
     {
       OutputDebugString(L"Failed to write memory\n");
       return false;
     }
+    if (ZwProtectVirtualMemory(handleManager.GetHandle(), reinterpret_cast<PVOID>(&address), &sVal, dwOldProtect, &dwOldProtect) != STATUS_SUCCESS)
+    {
+      OutputDebugString(L"WPM: Failed to protect memory\n");
+      return false;
+    }
+    return true;
   }
 
   /// Patches a region of memory with the given opcodes
   /// NOTE: The concept for patching and nopping bytes is taken from GuidedHacking, I rewrote it for better error handling
   SIZE_T Patch(uintptr_t address, const std::vector<BYTE>& opcodes)
   {
-    DWORD oldProtect;
+    DWORD dwOldProtect;
     SIZE_T bytes;
 
     std::vector<BYTE> newOpcodes = opcodes;
 
-    if (!VirtualProtectEx(handleManager.GetHandle(), reinterpret_cast<void*>(address), opcodes.size(), PAGE_EXECUTE_READWRITE, &oldProtect))
+    size_t size = opcodes.size();
+
+    if (ZwProtectVirtualMemory(handleManager.GetHandle(), reinterpret_cast<PVOID>(address), &size, PAGE_EXECUTE_READWRITE, &dwOldProtect) != STATUS_SUCCESS)
     {
       OutputDebugString(L"Patch failed: Failed to change protection\n");
       return NULL;
@@ -279,12 +349,12 @@ public:
 
     if (ZwWriteVirtualMemory(handleManager.GetHandle(), reinterpret_cast<void*>(address), reinterpret_cast<void*>(newOpcodes.data()), opcodes.size(), &bytes) != STATUS_SUCCESS)
     {
-      VirtualProtectEx(handleManager.GetHandle(), reinterpret_cast<void*>(address), opcodes.size(), oldProtect, &oldProtect);
+      ZwProtectVirtualMemory(handleManager.GetHandle(), reinterpret_cast<PVOID>(address), &size, dwOldProtect, &dwOldProtect);
       OutputDebugString(L"Patch failed: Failed to write memory\n");
       return NULL;
     }
 
-    VirtualProtectEx(handleManager.GetHandle(), reinterpret_cast<void*>(address), opcodes.size(), oldProtect, &oldProtect);
+    ZwProtectVirtualMemory(handleManager.GetHandle(), reinterpret_cast<PVOID>(address), &size, dwOldProtect, &dwOldProtect);
     return bytes;
   }
 

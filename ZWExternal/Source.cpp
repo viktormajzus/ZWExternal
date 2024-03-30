@@ -1,3 +1,5 @@
+#pragma comment(lib, "ntdll.lib")
+
 #include <Windows.h>
 #include <TlHelp32.h>
 
@@ -9,41 +11,24 @@
 
 int main()
 {
-  ZwMemTools mem = ZwMemTools(L"sauerbraten.exe");
+  ZwMemTools mem = ZwMemTools(L"sauerbraten.exe", PROCESS_ALL_ACCESS);
   uintptr_t moduleBase;
-  if (!mem.GetModuleBase(L"sauerbraten.exe", moduleBase))
-    return EXIT_FAILURE;
+  mem.GetModuleBase(L"sauerbraten.exe", moduleBase);
+  moduleBase += 0x346C90;
 
-  uintptr_t localPlayer = mem.Read<uintptr_t>(moduleBase + 0x2A2560);
+  int newVal = 50;
+  uintptr_t address = 0x1B431AAF25C;
 
-  bool bAmmo = false;
-  bool bHealth = false;
-  while (true)
-  {
-    if (GetAsyncKeyState(VK_END) & 1)
-      break;
+  uintptr_t addressOfBytes = 0x7FF734F3B5E0;
+  std::vector<BYTE> opcodes = { 0x41, 0x89, 0x84, 0x8E, 0x94, 0x01, 0x00, 0x00 };
 
-    if (GetAsyncKeyState(VK_NUMPAD1) & 1)
-    {
-      bAmmo = !bAmmo;
-      if (bAmmo)
-        mem.Nop((uintptr_t)0x7FF6B0D2B5E0, 8);
-      else
-        mem.Patch((uintptr_t)0x7FF6B0D2B5E0, { 0x41, 0x89, 0x84, 0x8E, 0x94, 0x01, 0x00, 0x00 });
-    }
+  mem.Write<int>(reinterpret_cast<PULONGLONG>(address), newVal);
 
-    if (GetAsyncKeyState(VK_NUMPAD2))
-      bHealth = !bHealth;
+  mem.Nop(addressOfBytes, opcodes.size());
 
-    if (bHealth)
-    {
-      uintptr_t healthAddr = localPlayer + 0x178;
-      uint32_t healthVal = 1000;
-      mem.Write<uint32_t>(healthAddr, healthVal);
-    }
+  mem.Patch(addressOfBytes, opcodes);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  
 
   return EXIT_SUCCESS;
 }

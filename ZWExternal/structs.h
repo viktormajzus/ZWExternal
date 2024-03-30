@@ -32,3 +32,8 @@ typedef struct _OBJECT_ATTRIBUTES
     (p)->SecurityDescriptor = s;                        \
     (p)->SecurityQualityOfService = NULL;               \
     }
+
+typedef enum _MEMORY_INFORMATION_CLASS
+{
+	MemoryBasicInformation
+} MEMORY_INFORMATION_CLASS, * PMEMORY_INFORMATION_CLASS;
